@@ -1,0 +1,173 @@
+use std::io::Error;
+use std::process::Command;
+
+use chrono::{DateTime, Local};
+use clap::{App, Arg};
+use influxdb::{Client, InfluxDbWriteable};
+use regex::Regex;
+
+#[tokio::main]
+async fn main() {
+    let matches = App::new("traceroute")
+        .version("0.1.0")
+        .arg(
+            Arg::new("destination")
+                .long("destination")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::new("destination-port")
+                .long("destination-port")
+                .takes_value(true)
+                .default_value("443"),
+        )
+        .arg(
+            Arg::new("influxdb-uri")
+                .long("influxdb-uri")
+                .takes_value(true)
+                .default_value("http://localhost:8086"),
+        )
+        .get_matches();
+
+    let destination = matches.value_of("destination").unwrap();
+    let destination_port = matches.value_of("destination-port").unwrap();
+    let output = traceroute(destination, destination_port).expect("Failed to trace");
+    let hops = parse(output.to_string());
+
+    println!("{:?}", hops);
+
+    let client = connect_influxdb(matches.value_of("influxdb-uri").unwrap()).unwrap();
+
+    for hop in hops {
+        for probe in hop.probes {
+            let point = Point {
+                hop: hop.id,
+                name: probe.name,
+                ip: probe.ip,
+                rtt: probe.rtt,
+                time: Local::now(),
+            };
+            client.query(point.into_query("point"))
+                .await
+                .expect("Failed to query");
+        }
+    }
+}
+
+fn connect_influxdb(uri: &str) -> Result<Client, Error> {
+    let client = Client::new(uri, "traceroute");
+    Ok(client)
+}
+
+fn traceroute(destination: &str, destination_port: &str) -> Result<String, Error> {
+    Command::new("tcptraceroute")
+        .arg(destination)
+        .arg(destination_port)
+        .output()
+        .map(|output| String::from_utf8(output.stdout).expect("Invalid UTF-8"))
+}
+
+fn parse(s: String) -> Vec<Hop> {
+    let mut hops: Vec<Hop> = Vec::new();
+    for line in s.split("\n").skip(2) {
+        println!("{}", line);
+        let hop: Option<Hop> = parse_hop(line);
+        if let Some(hop) = hop {
+            hops.push(hop);
+        }
+    }
+    hops
+}
+
+fn parse_hop(s: &str) -> Option<Hop> {
+    let mut hop = Hop::new();
+    let mut parts = s.split_whitespace().collect::<Vec<&str>>();
+    hop.id = parts.remove(0).parse().unwrap();
+    hop.probes = parse_probes(parts);
+    Some(hop)
+}
+
+fn parse_probes(mut parts: Vec<&str>) -> Vec<Probe> {
+    let mut probes: Vec<Probe> = Vec::new();
+    let re = Regex::new(r"\(.+\)").unwrap();
+
+    while parts.len() > 0 {
+        let tok1 = parts.remove(0);
+        if tok1 == "*" {
+            return probes;
+        }
+
+        let tok2 = parts.remove(0);
+        let mut probe = Probe::new();
+
+        if re.is_match(tok2) {
+            probe.name = tok1.to_string();
+            probe.ip = tok2[1..tok2.len() - 1].to_string();
+            probe.rtt = parts.remove(0).parse()
+                .or_else(|_| parts.remove(0).parse()).unwrap();
+            parts.remove(0); // Drop "ms"
+        } else if tok1 == "[open]" {
+            let prev = probes.last().unwrap();
+            probe.name = prev.name.clone();
+            probe.ip = prev.ip.clone();
+            probe.rtt = tok2.parse().unwrap();
+            parts.remove(0); // Drop "ms"
+        } else if tok2 == "ms" {
+            let prev = probes.last().unwrap();
+            probe.name = prev.name.clone();
+            probe.ip = prev.ip.clone();
+            probe.rtt = tok1.parse().unwrap();
+        } else {
+            probe.name = tok1.to_string();
+            probe.ip = tok1.to_string();
+            probe.rtt = tok2.parse().unwrap();
+            parts.remove(0); // Drop "ms"
+        }
+
+        probes.push(probe);
+    }
+
+    probes
+}
+
+#[derive(Debug)]
+struct Hop {
+    id: u8,
+    probes: Vec<Probe>,
+}
+
+impl Hop {
+    fn new() -> Self {
+        Hop {
+            id: 0,
+            probes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Probe {
+    name: String,
+    ip: String,
+    rtt: f64,
+}
+
+impl Probe {
+    fn new() -> Self {
+        Probe {
+            ip: String::new(),
+            name: String::new(),
+            rtt: 0.0,
+        }
+    }
+}
+
+#[derive(InfluxDbWriteable)]
+struct Point {
+    #[influxdb(tag)] hop: u8,
+    name: String,
+    ip: String,
+    rtt: f64,
+    time: DateTime<Local>,
+}
