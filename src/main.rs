@@ -34,7 +34,7 @@ async fn main() {
     let destination = matches.value_of("destination").unwrap();
     let destination_port = matches.value_of("destination-port").unwrap();
     let output = traceroute(destination, destination_port).expect("Failed to trace");
-    let hops = parse(output.to_string());
+    let hops = parse(output.trim().to_string());
     let client = connect_influxdb(matches.value_of("influxdb-uri").unwrap()).unwrap();
 
     for hop in hops {
@@ -68,6 +68,9 @@ fn traceroute(destination: &str, destination_port: &str) -> Result<String, Error
 
 fn parse(s: String) -> Vec<Hop> {
     let mut hops: Vec<Hop> = Vec::new();
+    if s.is_empty() {
+        return hops;
+    }
     for line in s.split("\n") {
         let hop: Option<Hop> = parse_hop(line);
         if let Some(hop) = hop {
