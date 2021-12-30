@@ -30,13 +30,11 @@ async fn main() {
         )
         .get_matches();
 
+    let now = Local::now();
     let destination = matches.value_of("destination").unwrap();
     let destination_port = matches.value_of("destination-port").unwrap();
     let output = traceroute(destination, destination_port).expect("Failed to trace");
     let hops = parse(output.to_string());
-
-    println!("{:?}", hops);
-
     let client = connect_influxdb(matches.value_of("influxdb-uri").unwrap()).unwrap();
 
     for hop in hops {
@@ -46,7 +44,7 @@ async fn main() {
                 name: probe.name,
                 ip: probe.ip,
                 rtt: probe.rtt,
-                time: Local::now(),
+                time: now.clone(),
             };
             client.query(point.into_query("point"))
                 .await
@@ -70,8 +68,7 @@ fn traceroute(destination: &str, destination_port: &str) -> Result<String, Error
 
 fn parse(s: String) -> Vec<Hop> {
     let mut hops: Vec<Hop> = Vec::new();
-    for line in s.split("\n").skip(2) {
-        println!("{}", line);
+    for line in s.split("\n") {
         let hop: Option<Hop> = parse_hop(line);
         if let Some(hop) = hop {
             hops.push(hop);
@@ -95,30 +92,35 @@ fn parse_probes(mut parts: Vec<&str>) -> Vec<Probe> {
     while parts.len() > 0 {
         let tok1 = parts.remove(0);
         if tok1 == "*" {
-            return probes;
+            continue;
         }
 
         let tok2 = parts.remove(0);
         let mut probe = Probe::new();
 
-        if re.is_match(tok2) {
+        if re.is_match(tok2) {  // ve474.cgn05.cwdc.myaisfibre.com (49.228.4.38)
             probe.name = tok1.to_string();
             probe.ip = tok2[1..tok2.len() - 1].to_string();
             probe.rtt = parts.remove(0).parse()
                 .or_else(|_| parts.remove(0).parse()).unwrap();
             parts.remove(0); // Drop "ms"
-        } else if tok1 == "[open]" {
+        } else if tok1 == "[open]" {  // kul09s16-in-f3.1e100.net (216.58.200.3) [open]  31.237 ms
             let prev = probes.last().unwrap();
             probe.name = prev.name.clone();
             probe.ip = prev.ip.clone();
             probe.rtt = tok2.parse().unwrap();
             parts.remove(0); // Drop "ms"
-        } else if tok2 == "ms" {
+        } else if tok2 == "[open]" { // 104.18.25.25 [open]  5.890 ms
+            probe.name = tok1.to_string();
+            probe.ip = tok1.to_string();
+            probe.rtt = parts.remove(0).parse().unwrap();
+            parts.remove(0); // Drop "ms"
+        } else if tok2 == "ms" { // 5.890 ms
             let prev = probes.last().unwrap();
             probe.name = prev.name.clone();
             probe.ip = prev.ip.clone();
             probe.rtt = tok1.parse().unwrap();
-        } else {
+        } else { // 49-228-0-0.24.cwdc.myaisfibre.com (49.228.0.252)  5.332 ms
             probe.name = tok1.to_string();
             probe.ip = tok1.to_string();
             probe.rtt = tok2.parse().unwrap();
